@@ -207,7 +207,7 @@ void InputTransform
         // ii) transform it
         inputTransform4x4_gpu(inEl, inEl);
 
-        // iii) write to queue (should try to optimize it using shared memory?)
+        // iii) write to output
         [unroll]
         for (int y = 0; y < 6; y++)
             [unroll]
@@ -229,7 +229,7 @@ void InputTransform
         // ii) transform it
         inputTransform4x4_gpu(inEl, inEl);
 
-        // iii) write to queue (should try to optimize it using shared memory?)
+        // iii) write to output
         [unroll]
         for (int y = 0; y < 6; y++)
             [unroll]
@@ -250,8 +250,8 @@ void InputTransform
 
         // ii) transform it
         inputTransform4x4_gpu(inEl, inEl);
-
-        // iii) write to queue (should try to optimize it using shared memory?)
+        
+        // iii) write to output
         [unroll]
         for (int y = 0; y < 6; y++)
             [unroll]
@@ -272,7 +272,7 @@ void InputTransform
         // ii) transform it
         inputTransform4x4_gpu(inEl, inEl);
 
-        // iii) write to queue (should try to optimize it using shared memory?)
+        // iii) write to output
         [unroll]
         for (int y = 0; y < 6; y++)
             [unroll]

@@ -496,7 +496,7 @@ int main()
 
 
     int loops = 10;
-    int iterPerLoop = 100;
+    int iterPerLoop = 1000;
 
     for (int i = 0; i < loops; i++)
     {
@@ -522,7 +522,6 @@ int main()
 
     convRef(N, K, C, H, W, 3, 3, fp16, cpuRef, cinput, cfilter, cbias, true);
     compareResults(coutput, cpuRef, outputElements, fp16);
-    //compareResults(ctransformedFilter, cpuRef, filterElements, fp16);
     
 
     if (persistentSize)
@@ -547,103 +546,3 @@ int main()
 
     getchar();
 }
-
-#if 0
-int main()
-{
-    const int gpuToUse = 0;
-    g_DXWrapper.init(gpuToUse);
-
-    const int useFp16 = true;
-    const int M = 256*4;
-    const int N = 256;
-    const int K = 256;
-    const int batch = 36;
-    const int elementSize = useFp16 ? sizeof(uint16_t) : sizeof(float);
-
-    void *cpuA = malloc(M*K*batch*elementSize);
-    void *cpuB = malloc(K*N*batch*elementSize);
-    void *cpuOut = malloc(M*N*batch*elementSize);
-    void *cpuRef = malloc(M*N*batch*elementSize);
-
-    fillRandomArray(cpuA, M*K*batch, useFp16);
-    fillRandomArray(cpuB, K*N*batch, useFp16);
-
-    ID3D12MetaCommand *pMetacommand = nullptr;
-    createGemmMetacommand(M, N, K, batch, useFp16, &pMetacommand);
-
-    size_t ASize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 0);
-    size_t BSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 1);
-    size_t OutSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 3);
-
-    size_t persistentSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 4);
-    size_t tempSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 5);
-    printf("\nPersistent size: %llu, temp size: %llu\n", persistentSize, tempSize);
-
-    D3D12Alloc persistent = {}, temperory = {}, A = {}, B = {}, Out = {};
-    g_DXWrapper.createAlloc(ASize, D3D12_HEAP_TYPE_DEFAULT, &A);
-    g_DXWrapper.createAlloc(BSize, D3D12_HEAP_TYPE_DEFAULT, &B);
-    g_DXWrapper.createAlloc(OutSize, D3D12_HEAP_TYPE_DEFAULT, &Out);
-
-    g_DXWrapper.uploadData(&A, cpuA, ASize);
-    g_DXWrapper.uploadData(&B, cpuB, BSize);
-
-    if (persistentSize)
-        g_DXWrapper.createAlloc(persistentSize, D3D12_HEAP_TYPE_DEFAULT, &persistent);  // huge alloc - driver bug!
-    if (tempSize)
-        g_DXWrapper.createAlloc(tempSize, D3D12_HEAP_TYPE_DEFAULT, &persistent);
-
-    GemmInitDesc initDesc = {};
-    initDesc.PersistentResource = persistent.descHandle;
-
-    g_DXWrapper.getCL()->InitializeMetaCommand(pMetacommand, &initDesc, sizeof(initDesc));
-
-    GemmExecuteDesc execDesc = {};
-    execDesc.AResource = A.descHandle;
-    execDesc.BResource = B.descHandle;
-    execDesc.OutputResource = Out.descHandle;
-    execDesc.PersistentResource = persistent.descHandle;
-    execDesc.TemporaryResource = temperory.descHandle;
-
-    int loops = 10;
-    int iterPerLoop = 100;
-
-    for (int i = 0; i < loops; i++)
-    {
-        g_DXWrapper.beginTimer();
-
-        for (int j=0;j< iterPerLoop;j++)
-            g_DXWrapper.getCL()->ExecuteMetaCommand(pMetacommand, &execDesc, sizeof(execDesc));
-
-        g_DXWrapper.endTimer();
-
-        g_DXWrapper.flushAndWait();
-        double time = g_DXWrapper.getTimeInSeconds();
-        double flops = (double(M) * N * K * 2 * iterPerLoop * batch) / time;
-        double bps = iterPerLoop * batch * (double(M)*N + M * K + K * N) * elementSize / time;
-        printf("\nTime taken: %g ms, TFlops: %g, GBps: %g\n", time * 1000 / iterPerLoop, flops / 1000000000000.0, bps / 1000000000.0);
-    }
-
-    g_DXWrapper.downloadData(cpuOut, &Out, OutSize);
-    matrixMulCPU(M, N, K, batch, cpuRef, cpuA, cpuB, useFp16);
-    compareResults(cpuOut, cpuRef, batch*M*N, useFp16);
-
-    if(persistentSize)
-        g_DXWrapper.destroyAlloc(&persistent);
-
-    if (tempSize)
-        g_DXWrapper.destroyAlloc(&temperory);
-
-    g_DXWrapper.destroyAlloc(&A);
-    g_DXWrapper.destroyAlloc(&B);
-    g_DXWrapper.destroyAlloc(&Out);
-    g_DXWrapper.destroy();
-
-    free(cpuA);
-    free(cpuB);
-    free(cpuOut);
-    free(cpuRef);
-
-    getchar();
-}
-#endif
