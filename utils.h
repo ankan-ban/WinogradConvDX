@@ -369,7 +369,7 @@ void convRef(int N, int K, int C, int H, int W, int S, int R, bool fp16,
                                 float ip = 0;
                                 if (y >= 0 && y < H && x >= 0 && x < W)
                                     ip = fp16 ? Fp16ToFp32(((uint16_t*)input)[INDEX_NCHW(n, c, y, x)]) :
-                                                (((uint16_t*)input)[INDEX_NCHW(n, c, y, x)]);
+                                                (((float*)input)[INDEX_NCHW(n, c, y, x)]);
                                 op += ip * filter;
                             }   // r
                         }   // s

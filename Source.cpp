@@ -277,7 +277,7 @@ private:
     ID3D12PipelineState* m_pOutputTransformState;
 
 public:
-    void init(ID3D12Device* pDevice)
+    void init(ID3D12Device* pDevice, bool fp16)
     {
         // 1. Create root signature - common for all shaders
 
@@ -320,14 +320,30 @@ public:
         D3D12_COMPUTE_PIPELINE_STATE_DESC stateDesc = {};
         stateDesc.pRootSignature = m_pRootSign;
 
-        stateDesc.CS = { g_InputTransform,
-                        sizeof(g_InputTransform) };
+        if (fp16)
+        {
+            stateDesc.CS = { g_InputTransform_FP16,
+                            sizeof(g_InputTransform_FP16) };
+        }
+        else
+        {
+            stateDesc.CS = { g_InputTransform_FP32,
+                            sizeof(g_InputTransform_FP32) };
+        }
         checkResult(pDevice->CreateComputePipelineState(
             &stateDesc, IID_PPV_ARGS(&m_pInputTransformState)));
 
         // 3. PSO for the OutputTransform shader
-        stateDesc.CS = { g_OutputTransform,
-                        sizeof(g_OutputTransform) };
+        if (fp16)
+        {
+            stateDesc.CS = { g_OutputTransform_FP16,
+                            sizeof(g_OutputTransform_FP16) };
+        }
+        else
+        {
+            stateDesc.CS = { g_OutputTransform_FP32,
+                            sizeof(g_OutputTransform_FP32) };
+        }
         checkResult(pDevice->CreateComputePipelineState(
             &stateDesc, IID_PPV_ARGS(&m_pOutputTransformState)));
     }
@@ -415,9 +431,9 @@ int main()
 {
     const int gpuToUse = 0;
     g_DXWrapper.init(gpuToUse);
-    g_ShaderWrapper.init(g_DXWrapper.getDevice());
-
     constexpr bool fp16 = true;
+
+    g_ShaderWrapper.init(g_DXWrapper.getDevice(), fp16);
 
     constexpr int N = 256;
     constexpr int C = 256;
@@ -496,13 +512,14 @@ int main()
 
 
     int loops = 10;
-    int iterPerLoop = 1000;
+    int iterPerLoop = 100;
 
     for (int i = 0; i < loops; i++)
     {
         g_DXWrapper.beginTimer();
         for (int j = 0; j < iterPerLoop; j++)
         {
+
             g_ShaderWrapper.InputTransform(N, C, g_DXWrapper.getCL(), &transformedInput, &input);
             g_DXWrapper.getCL()->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(transformedInput.pResource));
             g_DXWrapper.getCL()->ExecuteMetaCommand(pMetacommand, &execDesc, sizeof(execDesc));
