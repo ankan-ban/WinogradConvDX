@@ -290,6 +290,7 @@ void filterTransform4x4(T *transformedFilter, T *filter)
 
 
 #define INDEX_NCHW(n,c,h,w) ((n)*C*H*W + (c)*H*W + (h)*W + w)
+#define INDEX_NKHW(n,c,h,w) ((n)*K*H*W + (c)*H*W + (h)*W + w)
 #define FILTER_IDX_NCHW(k,c,h,w) ((k)*C*S*R + (c)*S*R + (h)*R + w)
 
 // transform KCSR (256x256x3x3) filter for winograd
@@ -383,11 +384,11 @@ void convRef(int N, int K, int C, int H, int W, int S, int R, bool fp16,
 
                     if (fp16)
                     {
-                        ((uint16_t*)output)[INDEX_NCHW(n, k, h, w)] = Fp32ToFp16(op);
+                        ((uint16_t*)output)[INDEX_NKHW(n, k, h, w)] = Fp32ToFp16(op);
                     }
                     else
                     {
-                        ((float*)output)[INDEX_NCHW(n, k, h, w)] = op;
+                        ((float*)output)[INDEX_NKHW(n, k, h, w)] = op;
                     }
 
                 }   // w
