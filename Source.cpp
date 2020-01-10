@@ -3,7 +3,14 @@
 #include <comdef.h>
 #include "d3dx12.h"
 #include "utils.h"
+
+#include "shared.h"
 #include "shaders.h"
+#include <chrono>
+#include <thread>
+
+const bool useFp16 = false;
+const bool useMetacommands = true;
 
 #define checkResult(ans) { _checkResult((ans), __FILE__, __LINE__); }
 inline void _checkResult(HRESULT hr, const char* file, int line) {
@@ -68,7 +75,7 @@ public:
         heapDesc.NumDescriptors = MAX_DESCS;
         checkResult(m_pDevice->CreateDescriptorHeap(&heapDesc, IID_PPV_ARGS(&m_pDescHeap)));
         nextFreeDescHeapSlot = 0;
-
+        m_pCL->SetDescriptorHeaps(1, &m_pDescHeap);
         m_fenceVal = 0ull;
         checkResult(m_pDevice->CreateFence(m_fenceVal, D3D12_FENCE_FLAG_NONE, IID_PPV_ARGS(&m_pFence)));
 
@@ -141,10 +148,9 @@ public:
 
             D3D12_UNORDERED_ACCESS_VIEW_DESC uavDesc = {};
             uavDesc.ViewDimension = D3D12_UAV_DIMENSION_BUFFER;
-            uavDesc.Format = DXGI_FORMAT_R32_TYPELESS;
-            uavDesc.Buffer.Flags = D3D12_BUFFER_UAV_FLAG_RAW;
             uavDesc.Buffer.FirstElement = 0;
-            uavDesc.Buffer.NumElements = size / 4;
+            uavDesc.Format = useFp16 ? DXGI_FORMAT_R16G16B16A16_FLOAT : DXGI_FORMAT_R32G32B32A32_FLOAT;
+            uavDesc.Buffer.NumElements = useFp16 ? size / 8 : size / 16;
 
             m_pDevice->CreateUnorderedAccessView(pAlloc->pResource, nullptr, &uavDesc,
                 cpuDescHandle);
@@ -165,6 +171,7 @@ public:
 
         m_pCA->Reset();
         m_pCL->Reset(m_pCA, NULL);
+        m_pCL->SetDescriptorHeaps(1, &m_pDescHeap);
     }
 
     ID3D12Device5* getDevice() { return m_pDevice; }
@@ -255,6 +262,42 @@ public:
         pAlloc->pResource->Release();
     }
 
+    void dumpTensor(D3D12Alloc alloc, int size, bool fp16 = true, bool allnewline = false) {
+        int bytes = size * (fp16 ? sizeof(uint16_t) : sizeof(float));
+
+        void *data = malloc(bytes);
+        downloadData(data, &alloc, bytes);
+
+        printf("\n");
+
+        float* fp32arr = (float*)data;
+        uint16_t* arr = (uint16_t*)data;
+
+        for (int i = 0; i < size; i++) {
+            printf("%8.4f ", fp16 ? Fp16ToFp32(arr[i]) : fp32arr[i]);
+            if (allnewline || ((i % 8) == 7)) printf("\n");
+        }
+        printf("\n");
+        free(data);
+    }
+
+    void loadTensor(D3D12Alloc alloc, int size, bool fp16 = true)
+    {
+        int bytes = size * (fp16 ? sizeof(uint16_t) : sizeof(float));
+        void *data = malloc(bytes);
+        float* fp32arr = (float*)data;
+        uint16_t* arr = (uint16_t*)data;
+
+        for (int i = 0; i < size; i++) {
+            float val;
+            scanf_s("%f", &val);
+            if (fp16)
+                arr[i] = Fp32ToFp16(val);
+            else
+                fp32arr[i] = val;
+        }
+    }
+
     void destroy()
     {
         m_pFence->Release();
@@ -275,17 +318,19 @@ private:
 
     ID3D12PipelineState* m_pInputTransformState;
     ID3D12PipelineState* m_pOutputTransformState;
-
+    ID3D12PipelineState* m_pMatMulState;
+	
 public:
     void init(ID3D12Device* pDevice, bool fp16)
     {
         // 1. Create root signature - common for all shaders
 
         // 5 slots
-        // slot 0 to 3 -> root UAV slots 0 to 3 (all in space 0)
+        // slot 0 to 3 -> root UAV slots 0 to 3 (all in space 0), 
         // slot 4      -> root constants (16 constants - should be enough)
-
-        D3D12_ROOT_PARAMETER rootParameter[5];
+        // slot 5 to 8 -> desc heap UAVs (slots 5 to 8), uav slot no 4 unused.
+        D3D12_DESCRIPTOR_RANGE descRange[4] = {};
+        D3D12_ROOT_PARAMETER rootParameter[9];
         for (int i = 0; i < 4; i++) {
             rootParameter[i].ParameterType = D3D12_ROOT_PARAMETER_TYPE_UAV;
             rootParameter[i].Descriptor.RegisterSpace = 0;
@@ -299,7 +344,21 @@ public:
         rootParameter[4].Constants.Num32BitValues = 16;
         rootParameter[4].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
 
-        D3D12_ROOT_SIGNATURE_DESC rootSigDesc = { 5, rootParameter, 0, NULL,
+        for (int i = 0; i < 4; i++) {
+            descRange[i].BaseShaderRegister = i + 5;
+            descRange[i].NumDescriptors = 1;
+            descRange[i].OffsetInDescriptorsFromTableStart = 0;
+            descRange[i].RangeType = D3D12_DESCRIPTOR_RANGE_TYPE_UAV;
+            descRange[i].RegisterSpace = 0;
+
+            rootParameter[i+5].ParameterType = D3D12_ROOT_PARAMETER_TYPE_DESCRIPTOR_TABLE;
+            rootParameter[i+5].DescriptorTable.NumDescriptorRanges = 1;
+            rootParameter[i+5].DescriptorTable.pDescriptorRanges = &descRange[i];
+            rootParameter[i+5].ShaderVisibility = D3D12_SHADER_VISIBILITY_ALL;
+        }
+
+
+        D3D12_ROOT_SIGNATURE_DESC rootSigDesc = { 9, rootParameter, 0, NULL,
                                                  D3D12_ROOT_SIGNATURE_FLAG_NONE };
 
         ID3DBlob* pSerializedLayout = NULL;
@@ -346,10 +405,20 @@ public:
         }
         checkResult(pDevice->CreateComputePipelineState(
             &stateDesc, IID_PPV_ARGS(&m_pOutputTransformState)));
+
+        // Ankan - test!
+        // PSO for Matrix multiply shader			
+        // fp16 = false;   // Ankan - hack: always use fp32 shader
+        stateDesc.CS = { fp16 ? g_MatrixMul_Fp16 : g_MatrixMul_Fp32,
+                        fp16 ? sizeof(g_MatrixMul_Fp16) : sizeof(g_MatrixMul_Fp32) };
+        checkResult(pDevice->CreateComputePipelineState(
+            &stateDesc, IID_PPV_ARGS(&m_pMatMulState)));
+			
     }
 
     void destroy()
     {
+        m_pMatMulState->Release();	
         m_pOutputTransformState->Release();
         m_pInputTransformState->Release();
         m_pRootSign->Release();
@@ -362,6 +431,9 @@ public:
         pCL->SetPipelineState(m_pInputTransformState);
         pCL->SetComputeRootUnorderedAccessView(0, pInput->gpuVA);
         pCL->SetComputeRootUnorderedAccessView(1, pTransformedInput->gpuVA);
+        pCL->SetComputeRootDescriptorTable(5, pInput->descHandle);
+        pCL->SetComputeRootDescriptorTable(6, pTransformedInput->descHandle);
+
         pCL->SetComputeRoot32BitConstants(4, 2, &Consts, 0);
 
         // TODO: remove hardcoding of 64
@@ -378,11 +450,31 @@ public:
         pCL->SetComputeRootUnorderedAccessView(0, TransformedOutput->gpuVA);
         pCL->SetComputeRootUnorderedAccessView(1, pOutput->gpuVA);
         pCL->SetComputeRootUnorderedAccessView(2, pBias->gpuVA);
+        pCL->SetComputeRootDescriptorTable(5, TransformedOutput->descHandle);
+        pCL->SetComputeRootDescriptorTable(6, pOutput->descHandle);
+        pCL->SetComputeRootDescriptorTable(7, pBias->descHandle);
+
         pCL->SetComputeRoot32BitConstants(4, 4, &Consts, 0);
 
         int  blocks = divUp(N*K, 64);
         pCL->Dispatch(blocks, 1, 1);
     }
+	
+    void MatrixMul(int M, int N, int K, int batch, ID3D12GraphicsCommandList *pCL, D3D12Alloc *pA, D3D12Alloc *pB, D3D12Alloc *pC)
+    {
+        int Consts[] = { M, N, K, batch };
+        pCL->SetComputeRootSignature(m_pRootSign);
+        pCL->SetPipelineState(m_pMatMulState);
+        pCL->SetComputeRootDescriptorTable(5, pA->descHandle);
+        pCL->SetComputeRootDescriptorTable(6, pB->descHandle);
+        pCL->SetComputeRootDescriptorTable(7, pC->descHandle);
+        pCL->SetComputeRoot32BitConstants(4, 4, &Consts, 0);
+        int blocksX = divUp(N, ELEMENTS_PER_BLOCK_X);
+        int blocksY = divUp(M, ELEMENTS_PER_BLOCK_Y);
+        int blocksZ = batch;
+
+        pCL->Dispatch(blocksX, blocksY, blocksZ);
+    }	
 };
 
 
@@ -431,7 +523,7 @@ int main()
 {
     const int gpuToUse = 0;
     g_DXWrapper.init(gpuToUse);
-    constexpr bool fp16 = true;
+    bool fp16 = useFp16;
 
     g_ShaderWrapper.init(g_DXWrapper.getDevice(), fp16);
 
@@ -487,31 +579,33 @@ int main()
 
     // Metacommand stuff
     ID3D12MetaCommand *pMetacommand = nullptr;
-    createGemmMetacommand(N*4, K, C, 36, fp16, &pMetacommand);
-    size_t persistentSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 4);
-    size_t tempSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 5);
-    printf("\nPersistent size: %llu, temp size: %llu\n", persistentSize, tempSize);
-    D3D12Alloc persistent = {}, temperory = {};
-    if (persistentSize)
-        g_DXWrapper.createAlloc(persistentSize, D3D12_HEAP_TYPE_DEFAULT, &persistent);  // huge alloc - driver bug!
-    if (tempSize)
-        g_DXWrapper.createAlloc(tempSize, D3D12_HEAP_TYPE_DEFAULT, &persistent);
-
-
-    GemmInitDesc initDesc = {};
-    initDesc.PersistentResource = persistent.descHandle;
-    g_DXWrapper.getCL()->InitializeMetaCommand(pMetacommand, &initDesc, sizeof(initDesc));
-    g_DXWrapper.getCL()->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(persistent.pResource));
-
     GemmExecuteDesc execDesc = {};
-    execDesc.AResource = transformedInput.descHandle;
-    execDesc.BResource = transformedFilter.descHandle;
-    execDesc.OutputResource = transformedOutput.descHandle;
-    execDesc.PersistentResource = persistent.descHandle;
-    execDesc.TemporaryResource = temperory.descHandle;
+    D3D12Alloc persistent = {}, temperory = {};
+    if (useMetacommands)
+    {
+        createGemmMetacommand(N * 4, K, C, 36, fp16, &pMetacommand);
+        size_t persistentSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 4);
+        size_t tempSize = pMetacommand->GetRequiredParameterResourceSize(D3D12_META_COMMAND_PARAMETER_STAGE_EXECUTION, 5);
+        printf("\nPersistent size: %llu, temp size: %llu\n", persistentSize, tempSize);
+        if (persistentSize)
+            g_DXWrapper.createAlloc(persistentSize, D3D12_HEAP_TYPE_DEFAULT, &persistent);  // huge alloc - driver bug!
+        if (tempSize)
+            g_DXWrapper.createAlloc(tempSize, D3D12_HEAP_TYPE_DEFAULT, &persistent);
 
 
-    int loops = 10;
+        GemmInitDesc initDesc = {};
+        initDesc.PersistentResource = persistent.descHandle;
+        g_DXWrapper.getCL()->InitializeMetaCommand(pMetacommand, &initDesc, sizeof(initDesc));
+        g_DXWrapper.getCL()->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(persistent.pResource));
+
+        execDesc.AResource = transformedInput.descHandle;
+        execDesc.BResource = transformedFilter.descHandle;
+        execDesc.OutputResource = transformedOutput.descHandle;
+        execDesc.PersistentResource = persistent.descHandle;
+        execDesc.TemporaryResource = temperory.descHandle;
+    }
+
+    int loops = 20;
     int iterPerLoop = 100;
 
     for (int i = 0; i < loops; i++)
@@ -521,8 +615,14 @@ int main()
         {
 
             g_ShaderWrapper.InputTransform(N, C, g_DXWrapper.getCL(), &transformedInput, &input);
+
+            //g_DXWrapper.dumpTensor(transformedInput, N*)
+
             g_DXWrapper.getCL()->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(transformedInput.pResource));
-            g_DXWrapper.getCL()->ExecuteMetaCommand(pMetacommand, &execDesc, sizeof(execDesc));
+            if (useMetacommands)
+                g_DXWrapper.getCL()->ExecuteMetaCommand(pMetacommand, &execDesc, sizeof(execDesc));
+            else
+                g_ShaderWrapper.MatrixMul(N * 4, K, C, 36, g_DXWrapper.getCL(), &transformedInput, &transformedFilter, &transformedOutput);
             g_DXWrapper.getCL()->ResourceBarrier(1, &CD3DX12_RESOURCE_BARRIER::UAV(transformedOutput.pResource));
             g_ShaderWrapper.OutputTransform(N, K, g_DXWrapper.getCL(), &output, &transformedOutput, &bias, true);
 
@@ -541,10 +641,10 @@ int main()
     compareResults(coutput, cpuRef, outputElements, fp16);
     
 
-    if (persistentSize)
+    if (persistent.pResource)
         g_DXWrapper.destroyAlloc(&persistent);
 
-    if (tempSize)
+    if (temperory.pResource)
         g_DXWrapper.destroyAlloc(&temperory);
 
     g_DXWrapper.destroyAlloc(&input);

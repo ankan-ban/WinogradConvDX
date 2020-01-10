@@ -1,30 +1,39 @@
 // for both input transform and output transform shaders
 #define BLOCK_SIZE 64
 
-#if FP16_IO == 1
-
-RWStructuredBuffer<float16_t4>  input             : register(u0);
-RWStructuredBuffer<float16_t>   transformedInput  : register(u1);
-
-RWStructuredBuffer<float16_t>  transformedOutput    : register(u0);
-RWStructuredBuffer<float16_t4> output               : register(u1);
-RWStructuredBuffer<float16_t>  bias                 : register(u2);
-
+#if USE_FP16_MATH == 1
+// All resources accessed as vectors are bound as typed 
+// buffers (of type A16R16G16B16F/A32R32G32B32F).
+RWBuffer<float16_t4> input                : register(u5);
+RWBuffer<float16_t4> output               : register(u6);
+RWBuffer<float16_t4> skipConnection       : register(u8);
 #else
+RWBuffer<float4> input                    : register(u5);
+RWBuffer<float4> output                   : register(u6);
+RWBuffer<float4> skipConnection           : register(u8);
+#endif
 
-RWStructuredBuffer<float4>  input             : register(u0);
-RWStructuredBuffer<float>   transformedInput  : register(u1);
 
-RWStructuredBuffer<float>  transformedOutput    : register(u0);
-RWStructuredBuffer<float4> output               : register(u1);
-RWStructuredBuffer<float>  bias                 : register(u2);
+#if FP16_IO == 1
+RWStructuredBuffer<float16_t>   transformedInput     : register(u1);
+RWStructuredBuffer<float16_t>   transformedOutput    : register(u0);
+RWStructuredBuffer<float16_t>   bias                 : register(u2);
+#else
+RWStructuredBuffer<float>       transformedInput     : register(u1);
+RWStructuredBuffer<float>       transformedOutput    : register(u0);
+RWStructuredBuffer<float>       bias                 : register(u2);
 #endif
 
 
 cbuffer consts : register(b0) {
     uint N, C;
+
+    // Additional fused ops.
+    // Used only by output transform shader.
     uint relu;
     uint useBias;
+    uint skipAdd;
+    uint fusedSe;
 };
 
 
@@ -329,6 +338,15 @@ void OutputTransform_FP16
             r2.y = board[y][5];
             r2.z = board[y][6];
             r2.w = board[y][7];
+            if (skipAdd) {
+                r1 += skipConnection[index];
+                r2 += skipConnection[index + 1];
+            }
+            if (relu) {
+              float16_t4 zeros = float16_t4(0, 0, 0, 0);
+              r1 = max(r1, zeros);
+              r2 = max(r2, zeros);
+            }
             output[index]     = r1;
             output[index + 1] = r2;
         }
@@ -607,16 +625,17 @@ void OutputTransform_FP32
         }
 
     // iii) apply relu and bias
+#if 0
     [unroll]
     for (int y = 0; y < 8; y++)
         [unroll]
         for (int x = 0; x < 8; x++)
         {
             board[y][x] += b;
-            if (relu && board[y][x] < 0)
+            if (relu && board[y][x] < 0) 
                 board[y][x] = 0;
         }
-
+#endif
 
     // iv) write to output
     {
@@ -637,6 +656,24 @@ void OutputTransform_FP32
             r2.y = board[y][5];
             r2.z = board[y][6];
             r2.w = board[y][7];
+
+            // bias
+            r1 += b;
+            r2 += b;
+
+            // residual add
+            if (skipAdd) {
+                r1 += skipConnection[index];
+                r2 += skipConnection[index+1];
+            }
+
+            // relu
+            if (relu) {
+              float4 zeros = float4(0, 0, 0, 0);
+              r1 = max(r1, zeros);
+              r2 = max(r2, zeros);
+            }
+
             output[index]     = r1;
             output[index + 1] = r2;
         }
